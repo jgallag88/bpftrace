@@ -97,38 +97,49 @@ int BPFtrace::add_probe(ast::Probe &p)
     bool underspecified_usdt_probe = (probetype(attach_point->provider) == ProbeType::usdt  && attach_point->ns.empty());
     if (attach_point->need_expansion && (has_wildcard(attach_point->func) || underspecified_usdt_probe))
     {
-      std::set<std::string> matches;
+      std::unique_ptr<std::istream> symbol_stream;
+      std::string prefix = "";
       switch (probetype(attach_point->provider))
       {
         case ProbeType::kprobe:
         case ProbeType::kretprobe:
-          matches = find_wildcard_matches(attach_point->target,
-                                          attach_point->func,
-                                          "/sys/kernel/debug/tracing/available_filter_functions");
+        {
+          symbol_stream = get_symbols_from_file(
+              "/sys/kernel/debug/tracing/available_filter_functions");
+          prefix = attach_point->target;
           break;
+        }
         case ProbeType::uprobe:
         case ProbeType::uretprobe:
         {
-            auto symbol_stream = std::istringstream(extract_func_symbols_from_path(attach_point->target));
-            matches = find_wildcard_matches("", attach_point->func, symbol_stream);
-            break;
+          symbol_stream = std::make_unique<std::istringstream>(
+              extract_func_symbols_from_path(attach_point->target));
+          break;
         }
         case ProbeType::tracepoint:
-          matches = find_wildcard_matches(attach_point->target,
-                                          attach_point->func,
-                                          "/sys/kernel/debug/tracing/available_events");
+        {
+          symbol_stream = get_symbols_from_file(
+              "/sys/kernel/debug/tracing/available_events");
+          prefix = attach_point->target;
           break;
+        }
         case ProbeType::usdt:
         {
-          auto usdt_symbol_stream = USDTHelper::probe_stream(pid_, attach_point->target);
-          matches = find_usdt_wildcard_matches(attach_point->ns, attach_point->func, usdt_symbol_stream);
+          symbol_stream = get_symbols_from_usdt(pid_, attach_point->target);
+          prefix = attach_point->ns;
           break;
         }
         default:
+        {
           std::cerr << "Wildcard matches aren't available on probe type '"
                     << attach_point->provider << "'" << std::endl;
           return 1;
+        }
       }
+
+      auto matches = find_wildcard_matches(prefix,
+                                           attach_point->func,
+                                           *symbol_stream);
 
       attach_funcs.insert(attach_funcs.end(), matches.begin(), matches.end());
     }
@@ -175,39 +186,10 @@ int BPFtrace::add_probe(ast::Probe &p)
   return 0;
 }
 
-// FIXME should this really be a separate function?
-std::set<std::string> BPFtrace::find_usdt_wildcard_matches(const std::string &prefix, const std::string &func, std::istream &symbol_name_stream)
-{
-  // Turn glob into a regex
-  std::string search_str = func;
-  if (prefix == "")
-    search_str = "*:" + func;
-  else
-    search_str = prefix + ":" + func;
-  auto regex_str = "(" + std::regex_replace(search_str, std::regex("\\*"), "[^\\s]*") + ")";
-  regex_str = "^" + regex_str + "$";
-
-  std::regex func_regex(regex_str);
-  std::smatch match;
-
-  std::string line;
-  std::set<std::string> matches;
-  while (std::getline(symbol_name_stream, line))
-  {
-    if (std::regex_search(line, match, func_regex))
-    {
-      assert(match.size() == 2);
-      // skip the ".part.N" kprobe variants, as they can't be traced:
-      if (std::strstr(match.str(1).c_str(), ".part.") == NULL)
-      {
-        matches.insert(match[1]);
-      }
-    }
-  }
-  return matches;
-}
-
-std::set<std::string> BPFtrace::find_wildcard_matches(const std::string &prefix, const std::string &func, std::istream &symbol_name_stream)
+std::set<std::string> BPFtrace::find_wildcard_matches(
+    const std::string &prefix,
+    const std::string &func,
+    std::istream &symbol_stream) const
 {
   if (!has_wildcard(func))
     return std::set<std::string>({func});
@@ -220,7 +202,7 @@ std::set<std::string> BPFtrace::find_wildcard_matches(const std::string &prefix,
   std::string line;
   std::set<std::string> matches;
   std::string full_prefix = prefix.empty() ? "" : (prefix + ":");
-  while (std::getline(symbol_name_stream, line))
+  while (std::getline(symbol_stream, line))
   {
     if (!full_prefix.empty()) {
       if (line.find(full_prefix, 0) != 0)
@@ -240,26 +222,39 @@ std::set<std::string> BPFtrace::find_wildcard_matches(const std::string &prefix,
   return matches;
 }
 
-std::set<std::string> BPFtrace::find_wildcard_matches(const std::string &prefix, const std::string &func, const std::string &file_name)
+std::unique_ptr<std::istream> BPFtrace::get_symbols_from_file(const std::string &path) const
 {
-  if (!has_wildcard(func))
-    return std::set<std::string>({func});
-  std::ifstream file(file_name);
-  if (file.fail())
+  auto file = std::make_unique<std::ifstream>(path);
+  if (file->fail())
   {
-    throw std::runtime_error("Could not read symbols from \"" + file_name + "\", err=" + std::to_string(errno));
+    throw std::runtime_error("Could not read symbols from " + path +
+                             ": " + strerror(errno));
   }
 
-  std::stringstream symbol_name_stream;
-  std::string line;
-  while (file >> line)
+  return file;
+}
+
+std::unique_ptr<std::istream> BPFtrace::get_symbols_from_usdt(
+    int pid,
+    const std::string &target) const
+{
+  std::string probes;
+  usdt_probe_list usdt_probes;
+
+  if (pid > 0)
+    usdt_probes = USDTHelper::probes_for_pid(pid);
+  else
+    usdt_probes = USDTHelper::probes_for_path(target);
+
+  for (auto const& usdt_probe : usdt_probes)
   {
-    symbol_name_stream << line << std::endl;
+    std::string path     = std::get<USDT_PATH_INDEX>(usdt_probe);
+    std::string provider = std::get<USDT_PROVIDER_INDEX>(usdt_probe);
+    std::string fname    = std::get<USDT_FNAME_INDEX>(usdt_probe);
+    probes += provider + ":" + fname + "\n";
   }
 
-  file.close();
-
-  return find_wildcard_matches(prefix, func, symbol_name_stream);
+  return std::make_unique<std::istringstream>(probes);
 }
 
 int BPFtrace::num_probes() const
