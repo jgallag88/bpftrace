@@ -70,7 +70,7 @@ public:
   std::string resolve_uid(uintptr_t addr) const;
   uint64_t resolve_kname(const std::string &name) const;
   uint64_t resolve_uname(const std::string &name, const std::string &path) const;
-  std::string extract_func_symbols_from_path(const std::string &path) const;
+  virtual std::string extract_func_symbols_from_path(const std::string &path) const;
   std::string resolve_probe(uint64_t probe_id) const;
   uint64_t resolve_cgroupid(const std::string &path) const;
   std::vector<std::unique_ptr<IPrintable>> get_arg_values(const std::vector<Field> &args, uint8_t* arg_data);
@@ -100,11 +100,18 @@ public:
   uint64_t mapmax_ = 4096;
   bool demangle_cpp_symbols = true;
 
-  static void sort_by_key(std::vector<SizedType> key_args,
-      std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> &values_by_key);
-  virtual std::set<std::string> find_usdt_wildcard_matches(const std::string &prefix, const std::string &func, std::istream &symbol_name_stream);
-  virtual std::set<std::string> find_wildcard_matches(const std::string &prefix, const std::string &func, std::istream &symbol_name_stream);
-  virtual std::set<std::string> find_wildcard_matches(const std::string &prefix, const std::string &attach_point, const std::string &file_name);
+  static void sort_by_key(
+      std::vector<SizedType> key_args,
+      std::vector<std::pair<std::vector<uint8_t>,
+      std::vector<uint8_t>>> &values_by_key);
+  std::set<std::string> find_wildcard_matches(
+      const std::string &prefix,
+      const std::string &func,
+      std::istream &symbol_stream) const;
+  virtual std::unique_ptr<std::istream> get_symbols_from_file(const std::string &path) const;
+  virtual std::unique_ptr<std::istream> get_symbols_from_usdt(
+      int pid,
+      const std::string &target) const;
 
 protected:
   std::vector<Probe> probes_;
