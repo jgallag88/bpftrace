@@ -1,0 +1,16 @@
+software:faults:1
+{
+        @probe1_init = 1;
+        if (@go == 1) { printf("first"); }
+}
+
+software:faults:1
+{
+        @probe2_init = 1;
+        if (@go == 1) { printf(" second\n"); exit() }
+}
+
+software:faults:1
+{
+        if (@probe1_init == 1 && @probe2_init == 1) { @go = 1; }
+}

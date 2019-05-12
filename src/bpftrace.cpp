@@ -601,7 +601,7 @@ std::unique_ptr<AttachedProbe> BPFtrace::attach_probe(Probe &probe, const BpfOrc
   return nullptr;
 }
 
-bool attach_reverse(Probe p)
+bool attach_reverse(const Probe &p)
 {
   switch(p.type)
   {
